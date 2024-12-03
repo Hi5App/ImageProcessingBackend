@@ -2,3 +2,4 @@
 data/
 session_result.json
 .idea/
+__pycache__

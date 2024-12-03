@@ -1,13 +1,20 @@
 version: '3'
 services:
   inferenceserver:
-    image: 3dunet-inferenceserver:v1
+    image: 3dunet-inferenceserver:latest
     ports:
       - "61234:5000"
     volumes:
-      - /Dev/inferenceimagepath:/app/data/input
+      - /Dev/inferenceimagepath:/app/data/
     networks:
       - braintell
+    deploy:
+        resources:
+            reservations:
+                devices:
+                    - driver: "nvidia"
+                      count: "all"
+                      capabilities: ["gpu"]
 networks:
   braintell:
     external: true

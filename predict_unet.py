@@ -2,8 +2,9 @@ import os
 import sys
 import numpy as np
 import SimpleITK as sitk
+from numba import njit
 from scipy.ndimage.interpolation import zoom
-
+import tensorflow as tf
 from model import unet_model_3d
 from Formatcov import load_v3d_raw_img_file1, save_v3d_raw_img_file1
 import argparse
@@ -29,41 +30,149 @@ config["patience"] = 10  # learning rate will be reduced after this many epochs 
 config["early_stop"] = 15  # training will be stopped after this many epochs without the validation loss improving
 config["learning_rate_drop"] = 0.5  # factor by which the learning rate will be reduced
 config["train_file"] = os.path.abspath("./DataPreprocess/train.h5")
-config["val_file"] = os.path.abspath("./DataPreprocess//val.h5")
+config["val_file"] = os.path.abspath("./DataPreprocess/val.h5")
 config["model_file"] = os.path.abspath("./logs/U_model.h5")
 config["overwrite"] = False  # If False, do not load model.
 
-os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
+# def itensity_normalize_one_volume(volume):
+#     pixels = volume[volume > 0]
+#     mean = pixels.mean()
+#     std = pixels.std()
+#     out = (volume - mean) / std
+#     out_random = np.random.normal(0, 1, size=volume.shape)
+#     out[volume == 0] = out_random[volume == 0]
+#     return out
+
+@njit
 def itensity_normalize_one_volume(volume):
-    pixels = volume[volume > 0]
-    mean = pixels.mean()
-    std = pixels.std()
-    out = (volume - mean) / std
-    out_random = np.random.normal(0, 1, size=volume.shape)
-    out[volume == 0] = out_random[volume == 0]
+    # Find indices where volume is greater than zero
+    indices = np.nonzero(volume > 0)
+
+    # Extract non-zero pixels using a loop
+    non_zero_pixels = []
+    for i in range(len(indices[0])):
+        non_zero_pixels.append(volume[indices[0][i], indices[1][i], indices[2][i]])
+    non_zero_pixels = np.array(non_zero_pixels, dtype=np.float32)
+
+    if non_zero_pixels.size == 0:
+        mean = 0.0
+        std = 1.0
+    else:
+        mean = non_zero_pixels.mean()
+        std = non_zero_pixels.std()
+
+    # Normalize the volume
+    out = (volume.astype(np.float32) - mean) / std
+
+    # Generate random noise
+    out_random = np.random.normal(0, 1, size=volume.shape).astype(np.float32)
+
+    # Replace zero values with random noise
+    zero_indices = np.nonzero(volume == 0)
+    for i in range(len(zero_indices[0])):
+        out[zero_indices[0][i], zero_indices[1][i], zero_indices[2][i]] = out_random[
+            zero_indices[0][i], zero_indices[1][i], zero_indices[2][i]]
+
     return out
 
 
+# def ResizeData(data, InputShape):
+#     [W, H, D] = data.shape
+#     scale = [InputShape[0] * 1.0 / W, InputShape[1] * 1.0 / H, InputShape[2] * 1.0 / D]
+#     data = zoom(data, scale, order=1)
+#     return data
+
 def ResizeData(data, InputShape):
     [W, H, D] = data.shape
-    scale = [InputShape[0] * 1.0 / W, InputShape[1] * 1.0 / H, InputShape[2] * 1.0 / D]
-    data = zoom(data, scale, order=1)
-    return data
+    original_depth = data.shape[2]
 
+    # 初始化一个用于存储调整大小后的数据的数组
+    resized_data = np.zeros(InputShape, dtype=data.dtype)
+
+    # 对每个深度切片进行处理
+    for z in range(InputShape[2]):
+        # 计算在原始深度中对应的索引
+        original_z = int(z / InputShape[2] * original_depth)
+        # 转换为Tensor，并添加一个额外的维度来形成3维张量
+        data_slice = tf.convert_to_tensor(data[:, :, original_z])[..., tf.newaxis]
+        # 使用TensorFlow的resize函数
+        resized_slice = tf.image.resize(data_slice, InputShape[0:2], method=tf.image.ResizeMethod.BILINEAR)
+        # 移除添加的维度，并将结果保存到输出数组中
+        resized_data[:, :, z] = resized_slice[..., 0].numpy()
+
+    return resized_data
+
+
+# def ResizeMap(data, InputShape):
+#     [W, H, D, C] = data.shape
+#     scale = [InputShape[0] * 1.0 / W, InputShape[1] * 1.0 / H, InputShape[2] * 1.0 / D, 1]
+#     data = zoom(data, scale, order=1)
+#     return data
 
 def ResizeMap(data, InputShape):
-    [W, H, D, C] = data.shape
-    scale = [InputShape[0] * 1.0 / W, InputShape[1] * 1.0 / H, InputShape[2] * 1.0 / D, 1]
-    data = zoom(data, scale, order=1)
-    return data
+    # 获取原始数据的深度和通道数
+    original_depth = data.shape[2]
+    num_channels = data.shape[3]
+
+    # 初始化一个用于存储调整大小后的数据的数组
+    resized_data = np.zeros(InputShape)
+
+    # 对每个通道和每个切片进行处理
+    for c in range(num_channels):
+        for z in range(InputShape[2]):
+            # 计算在原始深度中对应的索引
+            original_z = int(z / InputShape[2] * original_depth)
+            # 转换为Tensor，并添加一个额外的维度来形成3维张量
+            data_slice = tf.convert_to_tensor(data[:, :, original_z, c])[..., tf.newaxis]
+            # 使用TensorFlow的resize函数
+            resized_slice = tf.image.resize(data_slice, InputShape[0:2], method=tf.image.ResizeMethod.BILINEAR)
+            # 移除添加的维度，并将结果保存到输出数组中
+            resized_data[:, :, z, c] = resized_slice[..., 0].numpy()
+
+    return resized_data
+
+
+def save_image(im_save, pre_hot, i, save_dir, name, v3d_flag):
+    if v3d_flag:
+        im_save['data'] = pre_hot[:, :, :, i][..., np.newaxis]
+        im_save['data'] = np.uint8(im_save['data'] * 255)
+        im_save['data'].flags['WRITEABLE'] = True
+        save_path = os.path.join(save_dir, name.split('.v3draw')[0], f"{i}.v3draw")
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        if i == 9:
+            save_path = os.path.join(save_dir, name.split('.v3draw')[0], "8.v3draw")
+        save_v3d_raw_img_file1(im_save, save_path)
+    else:
+        im_save = sitk.GetImageFromArray(pre_hot[:, :, :, i])
+        save_path = os.path.join(save_dir, name.split('.nii')[0], f"{i}.nii")
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        if i == 9:
+            save_path = os.path.join(save_dir, name.split('.nii')[0], "8.nii")
+        sitk.WriteImage(im_save, save_path)
+
+
+def save_segmentation(im_save, pre_class, save_dir, name, v3d_flag):
+    if v3d_flag:
+        im_save['data'] = pre_class[..., np.newaxis]
+        im_save['data'] = np.uint8(im_save['data'])
+        save_path = os.path.join(save_dir, name.split('.v3draw')[0], 'seg.v3draw')
+        save_v3d_raw_img_file1(im_save, save_path)
+    else:
+        im_save = sitk.GetImageFromArray(pre_class)
+        save_path = os.path.join(save_dir, name.split('.nii')[0], 'seg.nii')
+        sitk.WriteImage(im_save, save_path)
 
 
 def inference(image_name):
-    save_dir = 'data/predict/'
-    image_dir = 'data/input/'
+    save_dir = '../inferenceimagepath/predict/'
+    image_dir = '../inferenceimagepath/input/'
     model_dir = config["model_file"]
+
+    print("is_built_with_cuda: ", tf.test.is_built_with_cuda())
+    print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
 
     if os.path.exists(save_dir) is False:
         os.makedirs(save_dir)
@@ -140,55 +249,68 @@ def inference(image_name):
             pre_class = np.float32(np.argmax(pre_hot, axis=3))
 
             for i in range(10):
-                print('processing class ', i, ' result...')
-                # processing classes prediction
+                print(f'processing class {i} result...')
                 pre_class[pre_class == i] = class2inten[i]
-                # saving one hot
                 if i != 8:
-                    if v3d_flag:
-                        im_save['data'] = pre_hot[:, :, :, i]
-                        im_save['data'] = im_save['data'][..., np.newaxis]
+                    save_image(im_save, pre_hot, i, save_dir, name, v3d_flag)
 
-                        # Convert the data to 8-bit integer
-                        im_save['data'] = np.uint8(im_save['data'] * 255)
-
-                        im_save['data'].flags['WRITEABLE'] = True
-                        save_path = save_dir + name.split('.v3draw')[0] + '/'
-                        if not os.path.exists(save_path):
-                            os.mkdir(save_path)
-                        if i != 9:
-                            save_path = save_path + str(i) + '.v3draw'
-                        elif i == 9:
-                            save_path = save_path + '/8.v3draw'
-                        save_v3d_raw_img_file1(im_save, save_path)
-                    else:
-                        # TODO：nii format dimension?
-                        im_save = sitk.GetImageFromArray(pre_hot[:, :, :, i])
-                        save_path = save_dir + name.split('.nii')[0] + '/'
-                        if not os.path.exists(save_path):
-                            os.mkdir(save_path)
-                        if i != 9:
-                            save_path = save_path + str(i) + '.nii'
-                        elif i == 9:
-                            save_path = save_path + '/8.nii'
-                        sitk.WriteImage(im_save, save_path)
-
-            # saving classes prediction
             print('saving seg result...')
-            if v3d_flag:
-                im_save['data'] = pre_class[..., np.newaxis]
-
-                # Convert the data to 8-bit integer
-                im_save['data'] = np.uint8(im_save['data'])
-
-                save_path = save_dir + name.split('.v3draw')[0] + '/seg.v3draw'
-                save_v3d_raw_img_file1(im_save, save_path)
-            else:
-                im_save = sitk.GetImageFromArray(pre_class)
-                save_path = save_dir + name.split('.nii')[0] + '/seg.nii'
-                sitk.WriteImage(im_save, save_path)
+            save_segmentation(im_save, pre_class, save_dir, name, v3d_flag)
             print('image processed successfully')
             return {'status': 'ok', 'message': 'image processed successfully'}
+
+            # for i in range(10):
+            #     print('processing class ', i, ' result...')
+            #     # processing classes prediction
+            #     pre_class[pre_class == i] = class2inten[i]
+            #     # saving one hot
+            #     if i != 8:
+            #         if v3d_flag:
+            #             im_save['data'] = pre_hot[:, :, :, i]
+            #             im_save['data'] = im_save['data'][..., np.newaxis]
+            #
+            #             # Convert the data to 8-bit integer
+            #             im_save['data'] = np.uint8(im_save['data'] * 255)
+            #
+            #             im_save['data'].flags['WRITEABLE'] = True
+            #             save_path = save_dir + name.split('.v3draw')[0] + '/'
+            #             if not os.path.exists(save_path):
+            #                 os.mkdir(save_path)
+            #             if i != 9:
+            #                 save_path = save_path + str(i) + '.v3draw'
+            #             elif i == 9:
+            #                 save_path = save_path + '/8.v3draw'
+            #             save_v3d_raw_img_file1(im_save, save_path)
+            #         else:
+            #             # TODO：nii format dimension?
+            #             im_save = sitk.GetImageFromArray(pre_hot[:, :, :, i])
+            #             save_path = save_dir + name.split('.nii')[0] + '/'
+            #             if not os.path.exists(save_path):
+            #                 os.mkdir(save_path)
+            #             if i != 9:
+            #                 save_path = save_path + str(i) + '.nii'
+            #             elif i == 9:
+            #                 save_path = save_path + '/8.nii'
+            #             sitk.WriteImage(im_save, save_path)
+            #
+            # # saving classes prediction
+            # print('saving seg result...')
+            # if v3d_flag:
+            #     im_save['data'] = pre_class[..., np.newaxis]
+            #
+            #     # Convert the data to 8-bit integer
+            #     im_save['data'] = np.uint8(im_save['data'])
+            #
+            #     save_path = save_dir + name.split('.v3draw')[0] + '/seg.v3draw'
+            #     save_v3d_raw_img_file1(im_save, save_path)
+            # else:
+            #     im_save = sitk.GetImageFromArray(pre_class)
+            #     save_path = save_dir + name.split('.nii')[0] + '/seg.nii'
+            #     sitk.WriteImage(im_save, save_path)
+            # print('image processed successfully')
+            # return {'status': 'ok', 'message': 'image processed successfully'}
+        if isImageFound:
+            break
 
     if isImageFound is False:
         print('image not found, please check image name')
@@ -196,4 +318,4 @@ def inference(image_name):
 
 
 if __name__ == "__main__":
-    inference("test.v3draw")
+    inference("191815.v3draw")

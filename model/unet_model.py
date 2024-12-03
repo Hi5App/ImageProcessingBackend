@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow.keras
 from tensorflow.keras import backend as K
-from keras.src.models import Model
+from keras.models import Model
 from tensorflow.keras.layers import Input, Conv3D, MaxPooling3D, AveragePooling3D, UpSampling3D, Add,Activation,BatchNormalization, \
     PReLU, LeakyReLU, add, Dense, Flatten, GlobalAveragePooling3D, Reshape, Multiply,Reshape,Subtract
 from tensorflow.keras.layers import Conv3DTranspose as Deconvolution3D
