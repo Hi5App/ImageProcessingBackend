@@ -5,9 +5,17 @@ import SimpleITK as sitk
 from numba import njit
 from scipy.ndimage.interpolation import zoom
 import tensorflow as tf
+from v3dpy.loaders import Raw
+
 from model import unet_model_3d
 from Formatcov import load_v3d_raw_img_file1, save_v3d_raw_img_file1
 import argparse
+from nnunetv2.paths import nnUNet_results, nnUNet_raw
+import torch
+from batchgenerators.utilities.file_and_folder_operations import join
+from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+from nnunetv2.imageio.simpleitk_reader_writer import SimpleITKIO
+
 
 sys.path.append("..")
 
@@ -31,7 +39,8 @@ config["early_stop"] = 15  # training will be stopped after this many epochs wit
 config["learning_rate_drop"] = 0.5  # factor by which the learning rate will be reduced
 config["train_file"] = os.path.abspath("./DataPreprocess/train.h5")
 config["val_file"] = os.path.abspath("./DataPreprocess/val.h5")
-config["model_file"] = os.path.abspath("./logs/U_model.h5")
+config["mouse_region_model_file"] = os.path.abspath("./logs/U_model.h5")
+config["neuron_model_file"] = os.path.abspath("./logs/checkpoint_final.pth")
 config["overwrite"] = False  # If False, do not load model.
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -166,10 +175,23 @@ def save_segmentation(im_save, pre_class, save_dir, name, v3d_flag):
         sitk.WriteImage(im_save, save_path)
 
 
-def inference(image_name):
+def inference(image_name, methodName):
+    torch.cuda.empty_cache()
+    tf.keras.backend.clear_session()
+
     save_dir = '../inferenceimagepath/predict/'
     image_dir = '../inferenceimagepath/input/'
-    model_dir = config["model_file"]
+    if methodName == "MouseBrainRegionSegment":
+        model_path = config["mouse_region_model_file"]
+    elif methodName == "NeuronSegment":
+        model_path = config["neuron_model_file"]
+    else:
+        print('method not found, please check method name')
+        return {'status': 'error', 'message': 'method not found, please check method name'}
+
+    if not os.path.exists(model_path):
+        print('model do not existing in ', model_path)
+        return {'status': 'error', 'message': 'model not found, please check model path'}
 
     print("is_built_with_cuda: ", tf.test.is_built_with_cuda())
     print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
@@ -177,87 +199,85 @@ def inference(image_name):
     if os.path.exists(save_dir) is False:
         os.makedirs(save_dir)
 
-    model = unet_model_3d(input_shape=config["input_shape"],
-                          pool_size=config["pool_size"],
-                          n_labels=config["n_labels"],
-                          deconvolution=config["deconvolution"])
-    if os.path.exists(model_dir):
-        model.load_weights(model_dir, by_name=True)
+    if methodName == "MouseBrainRegionSegment":
+        model = unet_model_3d(input_shape=config["input_shape"],
+                              pool_size=config["pool_size"],
+                              n_labels=config["n_labels"],
+                              deconvolution=config["deconvolution"])
+        model.load_weights(model_path, by_name=True)
         print(' ------------  load model !')
-    else:
-        print('model do not existing in ', model_dir)
-        return
-    input_shape = config["image_shape"]
 
-    class2inten = {}
-    class2inten[0] = 0
-    class2inten[1] = 62
-    class2inten[2] = 75
-    class2inten[3] = 80
-    class2inten[4] = 100
-    class2inten[5] = 145
-    class2inten[6] = 159
-    class2inten[7] = 168
-    class2inten[8] = 0
-    class2inten[9] = 249
+        input_shape = config["image_shape"]
 
-    names = os.listdir(image_dir)
-    isImageFound = False
-    for name in names:
-        if image_name == name:
-            isImageFound = True
-            image_path = os.path.join(image_dir, name)
-            if name.endswith('.v3draw'):
-                v3d_flag = True
-                im_v3d = load_v3d_raw_img_file1(image_path)['data']
-                shape_v3d = im_v3d.shape
-                im_np = im_v3d[..., 0]
-                ori_shape = im_np.shape
-                im_np = ResizeData(im_np, input_shape)
-                im_np = itensity_normalize_one_volume(im_np)
-                im_np = im_np[np.newaxis, ..., np.newaxis]
-                im_save = {}
-                im_save['size'] = shape_v3d
-                im_save['datatype'] = 1
-            elif name.endswith('.nii'):
-                # nii should have size: 320 568 456
-                # TODO: only handle 456 320 568 like issue
-                v3d_flag = False
-                im_np = sitk.GetArrayFromImage(sitk.ReadImage(image_path))
-                ori_shape = im_np.shape
-                if ori_shape[-1] > ori_shape[0] and ori_shape[-1] > ori_shape[1]:
-                    print('transfer nii shape ', ori_shape)
-                    im_np = im_np.transpose(1, -1, 0)
+        class2inten = {}
+        class2inten[0] = 0
+        class2inten[1] = 62
+        class2inten[2] = 75
+        class2inten[3] = 80
+        class2inten[4] = 100
+        class2inten[5] = 145
+        class2inten[6] = 159
+        class2inten[7] = 168
+        class2inten[8] = 0
+        class2inten[9] = 249
+
+        names = os.listdir(image_dir)
+        isImageFound = False
+        for name in names:
+            if image_name == name:
+                image_path = os.path.join(image_dir, name)
+                if name.endswith('.v3draw'):
+                    v3d_flag = True
+                    im_v3d = load_v3d_raw_img_file1(image_path)['data']
+                    shape_v3d = im_v3d.shape
+                    # 前面保留，提取最后一个维度索引为0位置的数据
+                    im_np = im_v3d[..., 0]
                     ori_shape = im_np.shape
-                    print('to ', ori_shape)
-                im_np = ResizeData(im_np, input_shape)
-                im_np = itensity_normalize_one_volume(im_np)
-                im_np = im_np[np.newaxis, ..., np.newaxis]
-            else:
-                print('wrong image format')
-                return
+                    im_np = ResizeData(im_np, input_shape)
+                    im_np = itensity_normalize_one_volume(im_np)
+                    im_np = im_np[np.newaxis, ..., np.newaxis]
+                    im_save = {}
+                    im_save['size'] = shape_v3d
+                    im_save['datatype'] = 1
+                elif name.endswith('.nii'):
+                    # nii should have size: 320 568 456
+                    # TODO: only handle 456 320 568 like issue
+                    v3d_flag = False
+                    im_np = sitk.GetArrayFromImage(sitk.ReadImage(image_path))
+                    ori_shape = im_np.shape
+                    if ori_shape[-1] > ori_shape[0] and ori_shape[-1] > ori_shape[1]:
+                        print('transfer nii shape ', ori_shape)
+                        im_np = im_np.transpose(1, -1, 0)
+                        ori_shape = im_np.shape
+                        print('to ', ori_shape)
+                    im_np = ResizeData(im_np, input_shape)
+                    im_np = itensity_normalize_one_volume(im_np)
+                    im_np = im_np[np.newaxis, ..., np.newaxis]
+                else:
+                    print('wrong image format')
+                    return
 
-            print('input image has shape: ', ori_shape, ' and will resize to shape: ', input_shape, ' as model input')
+                print('input image has shape: ', ori_shape, ' and will resize to shape: ', input_shape, ' as model input')
 
-            print('--------------------- predicting: ', name, '... ----------------------------')
-            pre_hot = model.predict(im_np)[0]
+                print('--------------------- predicting: ', name, '... ----------------------------')
+                pre_hot = model.predict(im_np)[0]
 
-            # saving segmentation map to nii or v3draw
-            print('resize predict map...')
-            pre_hot = ResizeMap(pre_hot, ori_shape + (10,))
-            print(pre_hot.shape)
-            pre_class = np.float32(np.argmax(pre_hot, axis=3))
+                # saving segmentation map to nii or v3draw
+                print('resize predict map...')
+                pre_hot = ResizeMap(pre_hot, ori_shape + (config["n_labels"],))
+                print(pre_hot.shape)
+                pre_class = np.float32(np.argmax(pre_hot, axis=3))
 
-            for i in range(10):
-                print(f'processing class {i} result...')
-                pre_class[pre_class == i] = class2inten[i]
-                if i != 8:
-                    save_image(im_save, pre_hot, i, save_dir, name, v3d_flag)
+                for i in range(config["n_labels"]):
+                    print(f'processing class {i} result...')
+                    pre_class[pre_class == i] = class2inten[i]
+                    if i != 8:
+                        save_image(im_save, pre_hot, i, save_dir, name, v3d_flag)
 
-            print('saving seg result...')
-            save_segmentation(im_save, pre_class, save_dir, name, v3d_flag)
-            print('image processed successfully')
-            return {'status': 'ok', 'message': 'image processed successfully'}
+                print('saving seg result...')
+                save_segmentation(im_save, pre_class, save_dir, name, v3d_flag)
+                print('image processed successfully')
+                return {'status': 'ok', 'message': 'image processed successfully'}
 
             # for i in range(10):
             #     print('processing class ', i, ' result...')
@@ -309,13 +329,73 @@ def inference(image_name):
             #     sitk.WriteImage(im_save, save_path)
             # print('image processed successfully')
             # return {'status': 'ok', 'message': 'image processed successfully'}
-        if isImageFound:
-            break
 
-    if isImageFound is False:
-        print('image not found, please check image name')
-        return {'status': 'error', 'message': 'image not found, please check image name'}
+        if isImageFound is False:
+            print('image not found, please check image name')
+            return {'status': 'error', 'message': 'image not found, please check image name'}
 
+    if methodName == "NeuronSegment":
+        # instantiate the nnUNetPredictor
+        predictor = nnUNetPredictor(
+            tile_step_size=0.5,
+            use_gaussian=True,
+            use_mirroring=True,
+            perform_everything_on_device=True,
+            device=torch.device('cuda', 0),
+            verbose=False,
+            verbose_preprocessing=False,
+            allow_tqdm=True
+        )
+        # initializes the network architecture, loads the checkpoint
+        predictor.initialize_from_trained_model_folder(
+            nnUNet_results,
+            use_folds=(0,),
+            checkpoint_name='checkpoint_final.pth',
+        )
+        print(' ------------  load model !')
+
+        # convert .v3draw to .nii.gz
+        names = os.listdir(image_dir)
+        isImageFound = False
+        for name in names:
+            if image_name == name:
+                image_path = os.path.join(image_dir, name)
+                if name.endswith('.v3draw'):
+                    v3d_flag = True
+                    # (y, x, z, c)
+                    im_v3d = load_v3d_raw_img_file1(image_path)['data']
+                    shape_v3d = im_v3d.shape
+                    im_v3d_converted = np.transpose(im_v3d, (2, 0, 1, 3))
+                    # 将转换后的 ndarray 转换为 SimpleITK 图像
+                    image = sitk.GetImageFromArray(im_v3d_converted)
+                    # 保存为 .nii.gz 格式
+                    im_nii_gz_name = name[0:-7] + ".nii.gz"
+                    sitk.WriteImage(image, os.path.join(image_dir, im_nii_gz_name))
+
+                    # predict a single numpy array
+                    # (c, z, y, x)
+                    img, props = SimpleITKIO().read_images([join(nnUNet_raw, im_nii_gz_name)])
+                    print(img.shape)
+                    # (z, y, x)
+                    ret = predictor.predict_single_npy_array(img, props, None, None, False)
+                    print(ret.shape)
+
+                    ret = np.expand_dims(ret, axis=0)
+                    save_path = os.path.join(save_dir, name.split('.v3draw')[0], 'seg.v3draw')
+                    raw = Raw()
+                    raw.save(save_path, ret)
+                    print('image processed successfully')
+                    return {'status': 'ok', 'message': 'image processed successfully'}
+
+        if isImageFound is False:
+            print('image not found, please check image name')
+            return {'status': 'error', 'message': 'image not found, please check image name'}
 
 if __name__ == "__main__":
-    inference("191815.v3draw")
+    # inference("191815.v3draw")
+    image_path = r'/Dev/inferenceimagepath/191815.v3draw'
+    im_v3d = load_v3d_raw_img_file1(image_path)['data']
+    raw = Raw()
+    im_v3draw = raw.load(image_path)
+    print(im_v3d.shape)
+    print(im_v3draw.shape)

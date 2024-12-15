@@ -16,7 +16,7 @@ FILE_DIRECTORY = '/Dev/inferenceimagepath'
 
 global_lock = threading.Lock()
 
-GlobalMethodList = {"MouseBrainRegionSegment"}
+GlobalMethodList = {"MouseBrainRegionSegment", "NeuronSegment"}
 
 
 def read_json(file_path):
@@ -32,7 +32,8 @@ def read_json(file_path):
 def write_json(file_path, data):
     with open(file_path, 'w') as json_file:
         json.dump(data, json_file, indent=4)
-        
+
+
 GlobalJsonConfig = read_json(JsonConfigFile)
 
 
@@ -62,11 +63,13 @@ def methodList():
 
     return jsonify({'response': response})
 
+
 @app.route('/api/netimagelist', methods=['GET'])
 def netImageList():
     images = os.listdir("../inferenceimagepath/input")
 
     return jsonify({'response': images})
+
 
 @app.route('/api/inference', methods=['POST'])
 def inferenceApi():
@@ -82,44 +85,44 @@ def inferenceApi():
                 response['result'] = item
                 return jsonify({'response': response})
 
-    if methodName == "MouseBrainRegionSegment":
-        sessionId = data['session_id']
-        imageName = data['image_name']
-        userName = data["user_name"]
-        forceRegenerate = data["force_regenerate"]
-        cachedResult = None
-        for user_results in GlobalJsonConfig.values():
-            for result in user_results:
-                if result['image_name'] == imageName:
-                    cachedResult = result
-
-        if cachedResult is not None and forceRegenerate == False:
-            response = {'status': 'ok', 'message': 'using cached image with same image_name.'}
-        else:
-            with global_lock:
-                response = predict_unet.inference(imageName)
-
-        response['result'] = {
-            "method_name": methodName,
-            "session_id": sessionId,
-            "image_name": imageName,
-            "user_name": userName,
-            "result_image_path":"predict" + "/" + Path(imageName).stem,
-            "result_image_name": "seg.v3draw",
-            "status": "finished",
-            "timestamp": time.time()
-        }
-
-        if userName not in GlobalJsonConfig:
-            GlobalJsonConfig[userName] = []
-
-        GlobalJsonConfig[userName].append(response['result'])
-        write_json(JsonConfigFile, GlobalJsonConfig)
-
-        return jsonify({'response': response})
-    
-    else:
+    if methodName not in GlobalMethodList:
         return jsonify({'response': {'status': 'error', 'message': 'method not found!'}})
+
+    sessionId = data['session_id']
+    imageName = data['image_name']
+    userName = data["user_name"]
+    forceRegenerate = data["force_regenerate"]
+    cachedResult = None
+    for user_results in GlobalJsonConfig.values():
+        for result in user_results:
+            if result['image_name'] == imageName and result["method_name"] == methodName:
+                cachedResult = result
+    if cachedResult is not None and forceRegenerate == False:
+        response = {'status': 'ok', 'message': 'using cached image with same image_name.'}
+        response['result'] = cachedResult
+        return jsonify({'response': response})
+
+    with global_lock:
+        response = predict_unet.inference(imageName, methodName)
+
+    response['result'] = {
+        "method_name": methodName,
+        "session_id": sessionId,
+        "image_name": imageName,
+        "user_name": userName,
+        "result_image_path": "predict" + "/" + Path(imageName).stem,
+        "result_image_name": "seg.v3draw",
+        "status": "finished",
+        "timestamp": time.time()
+    }
+
+    if userName not in GlobalJsonConfig:
+        GlobalJsonConfig[userName] = []
+
+    GlobalJsonConfig[userName].append(response['result'])
+    write_json(JsonConfigFile, GlobalJsonConfig)
+
+    return jsonify({'response': response})
 
 
 @app.route('/api/getallresult', methods=['POST'])

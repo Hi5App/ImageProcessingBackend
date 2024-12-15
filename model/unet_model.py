@@ -1,4 +1,5 @@
 import numpy as np
+import sys
 import tensorflow.keras
 from tensorflow.keras import backend as K
 from keras.models import Model
@@ -7,6 +8,7 @@ from tensorflow.keras.layers import Input, Conv3D, MaxPooling3D, AveragePooling3
 from tensorflow.keras.layers import Conv3DTranspose as Deconvolution3D
 from tensorflow.keras.optimizers import Adam,SGD
 from tensorflow.keras.layers import Lambda
+sys.path.append("/Dev/3dunet")
 
 from model.base_block import create_convolution_block,get_up_convolution,ChannelSep,Conv_shortcut_Block,\
     CurrentConvBlock,deeplab_atrous_Block
@@ -124,6 +126,11 @@ def unet_model_3d(input_shape, pool_size=(2, 2, 2), n_labels=9, initial_learning
     # print(model.summary())
     return model
 
+if __name__ == '__main__':
+    model = unet_model_3d(input_shape=(80, 144, 112, 1),
+                          n_labels=10,
+                          deconvolution=True)
+    model.summary()
 
 
 
