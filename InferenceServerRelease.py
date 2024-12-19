@@ -66,9 +66,11 @@ def methodList():
 
 @app.route('/api/netimagelist', methods=['GET'])
 def netImageList():
-    images = os.listdir("../inferenceimagepath/input")
+    # 获取文件夹中的所有文件
+    all_files = os.listdir("../inferenceimagepath/input")
+    filtered_files = [file for file in all_files if file.endswith(".v3draw") or file.endswith(".v3dpbd")]
 
-    return jsonify({'response': images})
+    return jsonify({'response': filtered_files})
 
 
 @app.route('/api/inference', methods=['POST'])

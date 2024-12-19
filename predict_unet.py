@@ -361,6 +361,8 @@ def inference(image_name, methodName):
             if image_name == name:
                 image_path = os.path.join(image_dir, name)
                 if name.endswith('.v3draw'):
+                    if not os.path.exists(os.path.join(save_dir, name.split('.v3draw')[0])):
+                        os.mkdir(os.path.join(save_dir, name.split('.v3draw')[0]))
                     v3d_flag = True
                     # (y, x, z, c)
                     im_v3d = load_v3d_raw_img_file1(image_path)['data']
@@ -380,6 +382,7 @@ def inference(image_name, methodName):
                     ret = predictor.predict_single_npy_array(img, props, None, None, False)
                     print(ret.shape)
 
+                    ret = ret * 255
                     ret = np.expand_dims(ret, axis=0)
                     save_path = os.path.join(save_dir, name.split('.v3draw')[0], 'seg.v3draw')
                     raw = Raw()
